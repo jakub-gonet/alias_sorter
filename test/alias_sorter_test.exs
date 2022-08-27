@@ -268,5 +268,29 @@ defmodule AliasSorterTest do
     end
   end
 
+  describe "LIMITATIONS" do
+    test "groups created by long grouped alias aren't considered single group" do
+      input = """
+      defmodule T do
+        alias A.BBBBBBBBBBBBBBBB
+
+        alias A.{
+          BBBBBBBBBBBBBBBB,
+          CCCCCCCCCCCCCCCC,
+          DDDDDDDDDDDDDDDD,
+          EEEEEEEEEEEEEEEE,
+          FFFFFFFFFFFFFFFF,
+          GGGGGGGGGGGGGGGG
+        }
+
+        alias A.CCCCCCCCCCCCCCCC
+      end
+      """
+
+      # should treat as one group and remove duplicated aliases
+      assert format(input) == input
+    end
+  end
+
   defp format(input), do: AliasSorter.format(input, @formatter_opts)
 end
