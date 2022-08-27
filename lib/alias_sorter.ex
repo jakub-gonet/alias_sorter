@@ -5,9 +5,6 @@ defmodule AliasSorter do
   ## Limitations
 
   - AliasSorter works on text and not on AST.
-  - Grouped aliases spanning multiple lines have leading and trailing newline.
-    This Elixir formatter behavior causes AliasSorter to consider it as a
-    different group.
   """
 
   @behaviour Mix.Tasks.Format
@@ -38,39 +35,60 @@ defmodule AliasSorter do
   end
 
   defp find_alias_groups(contents) do
-    group_aliases = fn part, {aliases, with_as_part} = acc ->
-      cond do
-        # we extract modules from aliases, treating aliases aliased by `:as` specially
-        alias?(part) ->
-          case extract_modules_from_aliases(part) do
-            {:as, alias_} -> {:cont, {aliases, [alias_ | with_as_part]}}
-            {:modules, modules} -> {:cont, {[modules | aliases], with_as_part}}
-          end
-
-        # we treat single newline as part of the group
-        part == "\n" ->
-          {:cont, acc}
-
-        # we got multiple newlines or some other code so we dump gathered
-        # aliases as a new group
-        # this generates tuple containing previous aliases group and next code
-        true ->
-          {:cont, {{Enum.reverse(aliases), Enum.reverse(with_as_part)}, part}, {[], []}}
-      end
-    end
-
-    dump_remaining = fn
-      {[], []} ->
-        {:cont, {[], []}}
-
-      {aliases, with_as_part} ->
-        {:cont, {Enum.reverse(aliases), Enum.reverse(with_as_part)}, {[], []}}
-    end
-
     @alias_regex
     |> Regex.split(contents, include_captures: true)
-    |> Enum.chunk_while({[], []}, group_aliases, dump_remaining)
+    |> unsplit_groups()
+    |> Enum.chunk_while({[], []}, &group_aliases/2, &dump_remaining/1)
     |> flatten_aliases_tuples()
+  end
+
+  defp unsplit_groups(split_by_aliases) do
+    do_unsplit_groups(split_by_aliases, [])
+  end
+
+  defguardp group_sep(text) when text == "\n" or text == "\n\n"
+
+  defp do_unsplit_groups([], result) do
+    Enum.reverse(result)
+  end
+
+  defp do_unsplit_groups([w1, text, w2 | rest], result) when group_sep(w1) and group_sep(w2) do
+    if grouped_alias?(text) do
+      do_unsplit_groups(rest, ["\n", text, "\n" | result])
+    else
+      do_unsplit_groups(rest, [w1, text, w2 | result])
+    end
+  end
+
+  defp do_unsplit_groups([text | rest], result) do
+    do_unsplit_groups(rest, [text | result])
+  end
+
+  defp group_aliases(part, {aliases, with_as_part} = acc) do
+    cond do
+      # we extract modules from aliases, treating aliases aliased by `:as` specially
+      alias?(part) ->
+        case extract_modules_from_aliases(part) do
+          {:as, alias_} -> {:cont, {aliases, [alias_ | with_as_part]}}
+          {:modules, modules} -> {:cont, {[modules | aliases], with_as_part}}
+        end
+
+      # we treat single newline as part of the group
+      part == "\n" ->
+        {:cont, acc}
+
+      # we got multiple newlines or some other code so we dump gathered
+      # aliases as a new group
+      # this generates tuple containing previous aliases group and next code
+      true ->
+        {:cont, {{Enum.reverse(aliases), Enum.reverse(with_as_part)}, part}, {[], []}}
+    end
+  end
+
+  defp dump_remaining({[], []}), do: {:cont, {[], []}}
+
+  defp dump_remaining({aliases, with_as_part}) do
+    {:cont, {Enum.reverse(aliases), Enum.reverse(with_as_part)}, {[], []}}
   end
 
   defp split_grouped({aliases, with_as_part}) do
@@ -176,5 +194,9 @@ defmodule AliasSorter do
     text
     |> String.trim_leading()
     |> String.starts_with?("alias")
+  end
+
+  defp grouped_alias?(text) do
+    alias?(text) and Regex.match?(~r/\{.+\}/s, text)
   end
 end
