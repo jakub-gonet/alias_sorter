@@ -100,7 +100,9 @@ defmodule AliasSorter do
   end
 
   defp join_alias_parts({prefix, suffixes}) do
-    ["alias #{Enum.join(prefix, ".")}.{#{Enum.join(suffixes, ", ")}}"]
+    sorted_suffixes = Enum.sort_by(suffixes, &String.downcase/1)
+
+    ["alias #{Enum.join(prefix, ".")}.{#{Enum.join(sorted_suffixes, ", ")}}"]
   end
 
   # We only group by second to last part of alias.
@@ -128,13 +130,8 @@ defmodule AliasSorter do
     alias_
     |> String.split(["{", "}", ","], trim: true)
     |> case do
-      [main_part | grouped] when grouped != [] ->
-        grouped
-        |> Enum.sort_by(&String.downcase/1)
-        |> Enum.map(&(main_part <> &1))
-
-      [single_alias] ->
-        single_alias
+      [main_part | grouped] when grouped != [] -> Enum.map(grouped, &(main_part <> &1))
+      [single_alias] -> single_alias
     end
   end
 
