@@ -1,0 +1,362 @@
+# Compacting and sorting aliases
+
+```elixir
+Mix.install([
+  {:sourceror, "~> 0.11.1"}
+])
+```
+
+## AST basics
+
+```elixir
+# ~S"""
+# defmodule A do
+# # comment
+# end
+# """
+# |> Sourceror.parse_string!()
+
+~S"""
+defmodule A do
+# comment
+end
+"""
+|> Code.string_to_quoted!()
+```
+
+```elixir
+quote do
+  1
+end
+|> IO.inspect(label: "number")
+
+quote do
+  {:ok, 1}
+end
+|> IO.inspect(label: "two element tuple")
+
+quote do
+  [1, 2, 3]
+end
+|> IO.inspect(label: "list")
+
+quote do
+  1 + 2
+end
+|> IO.inspect(label: "function call")
+
+quote do
+  def f(_arg), do: :ok
+end
+|> IO.inspect(label: "function definition")
+```
+
+```elixir
+simple_alias_ast =
+  quote do
+    alias A.B.C
+  end
+
+IO.inspect(simple_alias_ast, label: "alias")
+{:alias, _meta, content} = simple_alias_ast
+[{:__aliases__, _meta, module_parts}] = content
+IO.inspect(module_parts, label: "alias content")
+```
+
+```elixir
+grouped_alias_ast =
+  quote do
+    alias A.B.{C, D}
+  end
+
+IO.inspect(grouped_alias_ast, label: "grouped alias")
+{:alias, _meta, grouped_content} = grouped_alias_ast
+IO.inspect(grouped_content, label: "grouped alias content")
+
+[{dot_call, _meta, dotted_content}] = grouped_content
+{:., _meta, predot_aliases} = dot_call
+IO.inspect(predot_aliases, label: "grouped alias, AST before dot")
+IO.inspect(dotted_content, label: "grouped alias, AST after dot")
+```
+
+## AliasExpansion - basic
+
+```elixir
+defmodule AliasExpansion do
+  def expand_aliases(quoted) do
+    Sourceror.postwalk(
+      quoted,
+      fn
+        {:alias, _, [{{:., _, [_, :{}]}, _, _}]} = grouped_alias, state ->
+          full_aliases = expand_grouped_alias(grouped_alias)
+
+          {{:__block__, [wrapped: true], full_aliases}, state}
+
+        {:__block__, meta, content}, state ->
+          content = Enum.reduce(content, [], &unwrap_aliases/2)
+          {{:__block__, meta, content}, state}
+
+        quoted, state ->
+          {quoted, state}
+      end
+    )
+  end
+
+  defp expand_grouped_alias({:alias, _, [{{:., _, [left, :{}]}, _, right}]}) do
+    {:__aliases__, _meta, base_module_part} = left
+
+    Enum.map(right, &build_full_alias(base_module_part, &1))
+  end
+
+  defp build_full_alias(base, {:__aliases__, _meta, grouped_part}) do
+    full = {:__aliases__, [], base ++ grouped_part}
+    {:alias, [], [full]}
+  end
+
+  defp unwrap_aliases({:__block__, [wrapped: true], aliases}, args) do
+    args ++ aliases
+  end
+
+  defp unwrap_aliases(quoted, args) do
+    args ++ [quoted]
+  end
+end
+
+~S"""
+defmodule A do
+  alias A.{B, C}
+
+  43
+end
+"""
+|> Sourceror.parse_string!()
+|> AliasExpansion.expand_aliases()
+|> Sourceror.to_string()
+|> IO.puts()
+```
+
+## AliasExpansion - zippers
+
+```elixir
+defmodule AliasExpansion do
+  alias Sourceror.Zipper
+
+  def expand_aliases(quoted) do
+    quoted
+    |> Zipper.zip()
+    |> Zipper.traverse(&expand_grouped_alias/1)
+    |> Zipper.root()
+  end
+
+  defp expand_grouped_alias(
+         {
+           {:alias, _alias_meta, [{{:., _, [module_prefix, :{}]}, _call_meta, module_suffix}]},
+           _metadata
+         } = zipper
+       ) do
+    {:__aliases__, _meta, prefix} = module_prefix
+
+    module_suffix
+    |> Enum.map(&expand_alias(prefix, &1))
+    |> Enum.reverse()
+    # insert expanded aliases. insert_right doesn't move zipper, so we add them in reverse
+    |> Enum.reduce(replace_with_block(zipper), &Zipper.append_child(&2, &1))
+    |> inline_if_single_child()
+
+    IO.inspect(Zipper.up(zipper) |> Zipper.node())
+
+    zipper
+  end
+
+  defp expand_grouped_alias(zipper), do: zipper
+
+  defp expand_alias(prefix, {:__aliases__, meta, suffix}) do
+    full = {:__aliases__, [], prefix ++ suffix}
+    {:alias, meta, [full]}
+  end
+
+  defp replace_with_block(zipper) do
+    Zipper.replace(zipper, {:__block__, [trailing_comments: [], leading_comments: []], []})
+  end
+
+  defp inline_if_single_child(zipper) do
+    case Zipper.children(zipper) do
+      [tree] -> Zipper.replace(zipper, tree)
+      _children -> zipper
+    end
+  end
+end
+```
+
+```elixir
+defmodule AliasExpansion do
+  alias Sourceror.Zipper
+
+  def expand_aliases(quoted) do
+    quoted
+    |> Zipper.zip()
+    |> Zipper.traverse(&expand_grouped_alias/1)
+    |> Zipper.root()
+  end
+
+  defp expand_grouped_alias(
+         {
+           {:alias, _alias_meta, [{{:., _, [module_prefix, :{}]}, _call_meta, module_suffix}]},
+           _metadata
+         } = zipper
+       ) do
+    {:__aliases__, _meta, prefix} = module_prefix
+
+    zipper =
+      module_suffix
+      |> Enum.map(&expand_alias(prefix, &1))
+      |> Enum.reverse()
+      # insert expanded aliases. insert_right doesn't move zipper, so we add them in reverse
+      |> Enum.reduce(get_or_create_block(zipper), &Zipper.insert_child(&2, &1))
+      |> inline_if_single_child()
+
+    zipper
+  end
+
+  defp expand_grouped_alias(zipper), do: zipper
+
+  defp get_or_create_block(zipper) do
+    case Zipper.up(zipper) do
+      {{:__block__, _, _}, _zipper_meta} ->
+        zipper |> Zipper.remove() |> find_nearest_parent_block()
+
+      {{{:__block__, _, [:do]}, _}, _zipper_meta} ->
+        replace_with_block(zipper)
+    end
+  end
+
+  defp expand_alias(prefix, {:__aliases__, meta, suffix}) do
+    full = {:__aliases__, [], prefix ++ suffix}
+    {:alias, meta, [full]}
+  end
+
+  defp replace_with_block(zipper) do
+    Zipper.replace(zipper, {:__block__, [trailing_comments: [], leading_comments: []], []})
+  end
+
+  defp find_nearest_parent_block(zipper) do
+    traverse_while(zipper, fn
+      {{:__block__, _, _}, _meta} = zipper -> {:halt, zipper}
+      zipper -> {:cont, Zipper.up(zipper) || raise("no block found")}
+    end)
+  end
+
+  def traverse_while({tree, :end}, _), do: {tree, :end}
+
+  def traverse_while(zipper, f) do
+    case f.(zipper) do
+      {:cont, zipper} -> traverse_while(zipper, f)
+      {:halt, zipper} -> zipper
+    end
+  end
+
+  defp inline_if_single_child(zipper) do
+    case Zipper.children(zipper) do
+      [tree] -> Zipper.replace(zipper, tree)
+      _children -> zipper
+    end
+  end
+
+  defp inspect_node(zipper, label \\ "inspect_node") do
+    node = Zipper.node(zipper)
+    is_block = match?({:__block__, _, _}, node)
+
+    IO.inspect(is_block, label: "is block")
+    IO.inspect(node, label: label)
+
+    zipper
+  end
+end
+```
+
+## Expansion tests
+
+```elixir
+~S"""
+defmodule A do
+  alias A.{B, C}
+  alias D.{E, F}
+end
+"""
+|> Sourceror.parse_string!()
+|> AliasExpansion.expand_aliases()
+|> Sourceror.to_string()
+|> IO.puts()
+```
+
+```elixir
+defmodule AliasSorter do
+  def sort_aliases(quoted) do
+    quoted
+    |> Zipper.zip()
+    |> Zipper.traverse(&sort_aliases/1)
+    |> Zipper.root()
+  end
+
+  defp sort_aliases({{:__block__, _, _}, _meta} = zipper) do
+    children = Zipper.children(zipper)
+    sorted_aliases = 
+  end
+end
+```
+
+```elixir
+~S"""
+defmodule Sample do
+  # Some aliases
+  alias Foo.{A, B, C, D, E, F}
+
+  # Hello!
+  alias Bar.{G, H, I,
+
+    # Inner comment!
+    # Inner comment 2!
+    # Inner comment 3!
+    J,
+
+    # Comment for K!
+    K # Comment for K 2!
+
+    # Inner last comment!
+    # Inner last comment 2!
+  } # Not an inner comment
+
+  def foo() do
+    # Some scoped alias
+    alias Baz.{A, B, C}
+
+    # Just return :ok
+    :ok
+
+    # At the end
+  end
+
+  # Comment for :hello
+  :hello
+end
+# End of file!
+"""
+|> Sourceror.parse_string!()
+|> AliasExpansion.expand_aliases()
+|> Sourceror.to_string()
+|> IO.puts()
+```
+
+```elixir
+alias Sourceror.Zipper
+
+print = fn
+  {:do, _meta} = zipper -> IO.inspect(zipper)
+  {{:alias, _}, _meta} = zipper -> Zipper.prev(zipper)
+  zipper -> zipper
+end
+
+[{:do, [{:alias, :a}, {:alias, :b}]}]
+|> Zipper.zip()
+|> Zipper.traverse(print)
+```
