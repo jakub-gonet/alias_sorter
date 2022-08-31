@@ -78,6 +78,7 @@ defmodule AliasSorterTest do
       # in group
       input = """
       defmodule T do
+        alias A.B.C
         alias A.{B, A}
       end
       """
@@ -85,6 +86,30 @@ defmodule AliasSorterTest do
       output = """
       defmodule T do
         alias A.{A, B}
+        alias A.B.C
+      end
+      """
+
+      assert format(input) == output
+    end
+
+    test "multiple grouped aliases" do
+      # in group
+      input = """
+      defmodule T do
+        alias A.B.C
+        alias B
+        alias B.{C, D}
+        alias A.{B, A}
+      end
+      """
+
+      output = """
+      defmodule T do
+        alias A.{A, B}
+        alias A.B.C
+        alias B
+        alias B.{C, D}
       end
       """
 

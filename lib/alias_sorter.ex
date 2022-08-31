@@ -87,7 +87,9 @@ defmodule AliasSorter do
     grouped_aliases
     |> Enum.flat_map(&join_alias_parts/1)
     |> Kernel.++(with_as_part)
-    |> Enum.sort_by(&String.downcase/1)
+    |> Enum.sort_by(fn a ->
+      a |> String.downcase() |> String.split("{", parts: 2) |> List.first()
+    end)
     |> Enum.join("\n")
   end
 
